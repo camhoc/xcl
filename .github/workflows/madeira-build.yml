@@ -1,0 +1,65 @@
+# Madeira test build (camhoc fork only, not for upstream): builds xcl.exe + its own test title
+# on a GitHub Windows runner, runs the test title once, and uploads everything as one artifact
+# so it can be tried inside Madeira (FEX + Wine on iOS). No game data.
+name: Madeira build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [madeira-build]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust (stable, MSVC)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - name: Build (release)
+        run: cargo build --release --workspace 2>&1 | Tee-Object build.log
+
+      - name: DXC (Microsoft release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download -R microsoft/DirectXShaderCompiler --pattern 'dxc_2*.zip' -D dxczip
+          Expand-Archive (Get-ChildItem dxczip\*.zip | Select-Object -First 1).FullName -DestinationPath dxc
+          gh release view -R microsoft/DirectXShaderCompiler --json tagName -q .tagName | Tee-Object dxc-version.txt
+
+      - name: Package
+        run: |
+          $p = "pkg"
+          New-Item -ItemType Directory -Force "$p\game", "$p\dxc" | Out-Null
+          Copy-Item target\release\xcl.exe $p\
+          Copy-Item -Recurse tests\data\testgame\* "$p\game\"
+          Copy-Item target\release\xcl_testtitle.exe, target\release\testgame_mw.dll "$p\game\"
+          Copy-Item dxc\bin\x64\* "$p\dxc\"
+          Copy-Item LICENSE, THIRD_PARTY.md, build.log, dxc-version.txt $p\
+          git rev-parse HEAD | Out-File -Encoding ascii "$p\xcl-commit.txt"
+
+      - name: Run the test title once
+        continue-on-error: true
+        env:
+          XCL_DXC_DIR: ${{ github.workspace }}\pkg\dxc
+          XCL_DATA_ROOT: ${{ github.workspace }}\xcldata
+        run: |
+          & pkg\xcl.exe run pkg\game -- --hello *>&1 | Tee-Object pkg\testtitle-run.txt
+          "exit code: $LASTEXITCODE" | Tee-Object -Append pkg\testtitle-run.txt
+          if (Test-Path xcldata) { Copy-Item -Recurse xcldata pkg\xcldata }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xcl-madeira-${{ github.sha }}
+          path: pkg
